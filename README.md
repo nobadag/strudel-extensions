@@ -37,9 +37,9 @@ stack(
 - Works with any `Pattern`, including ones built with `$:` or `stack(...)`.
 - Already-loaded samples are tracked globally, so calling `.preload()` again (e.g. on re-evaluation) won't reload what's already cached.
 
-### `pickX.mjs` — `.pickX(variants)`
+### `pickX.mjs` — `.pickX()` and friends
 
-Selects a different pattern per "section" name, driven by a structure pattern like `"<A!7 B C!14 D!2 E!32>"`.
+Selects a different pattern per "section" name, driven by a structure pattern like `"<A!7 B C!14 D!2 E!32>"`. Key resolution is deferred to query time (`fmap` + join), so there's no need to enumerate a song's part names up front.
 
 ```js
 const song = "<A!7 B C!14 D!2 E!32>"
@@ -52,6 +52,26 @@ song.pickX(variants)
 ```
 
 - Section names not found in `variants` fall back to a numeral-stripped key (e.g. `C2` falls back to `C`), then to silence.
+- A `variants` key can be a comma-separated list to map multiple section names to the same pattern:
+
+```js
+const variants = {
+  'A,A2': s("bd*4"), // both "A" and "A2" resolve to this pattern
+  B: s("bd sd"),
+}
+```
+
+Five variants are provided, differing only in which join they use internally — pick the one that matches how you want the sub-pattern's phase to behave at part boundaries:
+
+| Function | Join used | Behavior |
+| --- | --- | --- |
+| `pickX` | `innerJoin` | Keeps the absolute cycle position of the picked pattern. Good for tracks that should keep evolving continuously across part boundaries. |
+| `pickRestartX` | `restartJoin` | Restarts the picked pattern from its own cycle 0 every time the outer (song) pattern re-triggers. Use when phase drift across boundaries is audible (e.g. panned/L-R patterns). |
+| `pickResetX` | `resetJoin` | Resets the picked pattern to the start of the *current* cycle (not absolute cycle 0) on every outer onset. |
+| `pickOutX` | `outerJoin` | The outer (song) pattern's structure wins — useful when the song pattern itself encodes multiple simultaneous layers. |
+| `pickSqueezeX` | `squeezeJoin` | Squeezes one full cycle of the picked pattern into the duration of the selecting slot. |
+
+All five share the same `variants` object shape (including comma-separated keys and numeral-suffix fallback) and can be swapped in for each other freely.
 
 ### `timestretch.mjs` — `.timeStretch()`, `.loopAtStretch()`, `.fitStretch()`
 
@@ -110,9 +130,9 @@ stack(
 - `$:`構文でも`stack(...)`でも、どんな`Pattern`にも使えます。
 - 読み込み済みのサンプルはグローバルに記録されるため、再評価時に`.preload()`を再度呼んでも、キャッシュ済みのものは読み直しません。
 
-### `pickX.mjs` — `.pickX(variants)`
+### `pickX.mjs` — `.pickX()`とその仲間たち
 
-`"<A!7 B C!14 D!2 E!32>"`のような構成パターンに応じて、セクション名ごとに異なるパターンを選択します。
+`"<A!7 B C!14 D!2 E!32>"`のような構成パターンに応じて、セクション名ごとに異なるパターンを選択します。キーの解決はクエリ時に遅延評価される(`fmap`＋join)ため、曲のパート名を事前に列挙しておく必要はありません。
 
 ```js
 const song = "<A!7 B C!14 D!2 E!32>"
@@ -125,6 +145,26 @@ song.pickX(variants)
 ```
 
 - `variants`に存在しないセクション名は、末尾の数字を除いたキー（例: `C2`→`C`）にフォールバックし、それも無ければ無音になります。
+- `variants`のキーはカンマ区切りで複数指定でき、複数のセクション名を同じパターンに割り当てられます:
+
+```js
+const variants = {
+  'A,A2': s("bd*4"), // "A"と"A2"どちらも同じパターンになる
+  B: s("bd sd"),
+}
+```
+
+5つのバリエーションがあり、違いは内部で使うjoinの種類だけです。パート境界でサブパターンの位相（フェーズ）をどう扱いたいかで選んでください:
+
+| 関数 | 使用join | 挙動 |
+| --- | --- | --- |
+| `pickX` | `innerJoin` | 選択したパターンの絶対サイクル位置を保持。パート境界をまたいで連続的に発展し続けてほしいトラック向け |
+| `pickRestartX` | `restartJoin` | 外側（曲構成）パターンが再トリガーされるたびに、選択したパターン自身のサイクル0から再スタート。パンなどL-R系パターンで境界をまたぐ位相ズレが聴感上気になる場合に使用 |
+| `pickResetX` | `resetJoin` | 外側パターンのオンセットのたびに、選択したパターンを（絶対サイクル0ではなく）*現在の*サイクルの先頭にリセット |
+| `pickOutX` | `outerJoin` | 外側（曲構成）パターンの構造が優先される。曲構成パターン自体が複数の同時レイヤーを表現している場合に有用 |
+| `pickSqueezeX` | `squeezeJoin` | 選択したパターンの1サイクル分を、選択スロットの長さに圧縮して詰め込む |
+
+5つとも同じ`variants`オブジェクトの形式（カンマ区切りキー・数字サフィックスのフォールバックを含む）を共有しているので、自由に差し替えて使えます。
 
 ### `timestretch.mjs` — `.timeStretch()`, `.loopAtStretch()`, `.fitStretch()`
 
