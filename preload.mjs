@@ -12,7 +12,10 @@ Pattern.prototype.preload = function (cycles = 4) {
       this.queryArc(i, i + 1).forEach((hap) => {
         const v = hap.value;
         if (!v || !v.s) return;
-        const key = v.s + ':' + (v.n ?? 0) + ':' + (v.bank ?? '');
+        // multi-sample instruments (e.g. piano) pick a different underlying
+        // file per note, so pitch must be part of the cache key too
+        const noteStr = typeof v.note === 'object' ? JSON.stringify(v.note) : String(v.note ?? '');
+        const key = v.s + ':' + (v.n ?? 0) + ':' + (v.bank ?? '') + ':' + noteStr;
         if (_preloadSeen.has(key)) return;
         _preloadSeen.add(key);
         jobs.push(
