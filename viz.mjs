@@ -107,6 +107,18 @@ const scopeState = {
 // destination(スピーカー出口)への接続を検知し、共有analyserに繋ぎ替える。
 // superdoughはノートごとに使い捨てのgainノードを作って直接destinationに繋ぐ構成なので、
 // 「マスターgainを名指しで掴む」のではなく「destinationへの接続そのものを横取りする」方式にしている。
+//
+// 注意: Strudelは再生の開始/停止のタイミングでAudioContextを作り直すことがある。
+// 共有analyserが古いcontextのまま残っていると「different AudioContexts」エラーになるため、
+// 接続しようとしているノードのcontextと共有analyserのcontextが食い違っていたら作り直す。
+// destination(スピーカー出口)への接続を検知し、共有analyserに繋ぎ替える。
+// superdoughはノートごとに使い捨てのgainノードを作って直接destinationに繋ぐ構成なので、
+// 「マスターgainを名指しで掴む」のではなく「destinationへの接続そのものを横取りする」方式にしている。
+//
+// 注意: .preload() 等はOfflineAudioContext(オフラインレンダリング、実際には音が出ない)
+// 上でも同じ connect(destination) を呼ぶため、区別せず同じanalyserに繋ごうとすると
+// 「別のAudioContext同士は接続できない」というエラーになる。
+// OfflineAudioContext由来の接続は可視化する意味がないので、素通りさせて無視する。
 function installDestinationTap(fftSize) {
   if (scopeState.tapInstalled) return;
   scopeState.tapInstalled = true;
@@ -115,6 +127,11 @@ function installDestinationTap(fftSize) {
   AudioNode.prototype.connect = function (dest, ...rest) {
     if (typeof AudioDestinationNode !== 'undefined' && dest instanceof AudioDestinationNode) {
       const ctx = this.context;
+
+      if (typeof OfflineAudioContext !== 'undefined' && ctx instanceof OfflineAudioContext) {
+        return origConnect.call(this, dest, ...rest);
+      }
+
       if (!scopeState.analyser) {
         scopeState.analyser = ctx.createAnalyser();
         scopeState.analyser.fftSize = fftSize;
