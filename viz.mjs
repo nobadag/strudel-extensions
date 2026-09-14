@@ -84,8 +84,8 @@ Pattern.prototype.vizHaps = function (url = 'ws://localhost:8181', options = {})
         ws.send(
           JSON.stringify({
             value: hap.value,
-            begin: Number(hap.whole.begin),
-            dur: Number(hap.duration),
+            begin: hap.whole.begin.valueOf(),
+            dur: hap.duration.valueOf(),
           })
         );
       }
