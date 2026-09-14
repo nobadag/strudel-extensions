@@ -6,12 +6,15 @@
 // 2つの独立した仕組みを提供する:
 //
 //   .vizHaps()  — hapベース。発音イベント(音程・gain・タイミング等)を送信する。
-//                 `.pianoroll()` / `.punchcard()` などが内部で使っているのと同じ
-//                 `Pattern.prototype.draw(callback, {lookbehind, lookahead})` フックの上に構築されている。
+//                 `Pattern.prototype.draw(callback, {lookbehind, lookahead})` フックの
+//                 上に構築されている。
 //
-//   .vizScope() — 音声信号ベース。マスター出力(全パターン合成後)の時間波形を送信する。
-//                 hapとは無関係に、superdoughが実際に鳴らしている音声そのものから
-//                 AnalyserNodeで波形を取得する。
+//   .vizScope() — 音声信号ベース。差した対象のパターン自身の音声波形を送信する。
+//                 superdoughの `.analyze(id)` コントロール(hapごとの、音には影響しない
+//                 wet send)を使っているため、真にパターン単位で部分適用できる。
+//                 マスター全体の波形が欲しい場合は、これまで通り
+//                 `stack(...).vizScope()` のように一番外側に差せばよい
+//                 (analyzeがstack全体に均等にかかるため、結果的に全体のミックスになる)。
 //
 // どちらか片方だけでも、両方チェインしても動く。
 //
@@ -20,15 +23,13 @@
 //   await import('https://cdn.jsdelivr.net/gh/nobadag/strudel-extensions@main/viz.mjs')
 //
 //   stack(
-//     s('bd*2 ~ bd sd').bank('RolandTR909'),
-//     s('hh*8').gain(0.5),
-//     note('<0 3 7 10>*4').scale('D4:minor').s('sawtooth')
-//   ).vizHaps().vizScope()
+//     s('bd*2 ~ bd sd').bank('RolandTR909').vizScope('ws://localhost:8181', { id: 'drums' }),
+//     note('<0 3 7 10>*4').scale('D4:minor').s('sawtooth').vizScope('ws://localhost:8181', { id: 'lead' })
+//   ).vizHaps()
 //
-// 注意: .vizScope() は AudioNode.prototype.connect を書き換えて
-//       マスター出力にAnalyserNodeを差し込む。この副作用は一度きりなので、
-//       コードを試行錯誤する間はタブをリロードしてから評価し直すこと
-//       (リロードなしで再評価を繰り返すと、内部状態が中途半端に残ることがある)。
+// 注意: getAnalyzerData / getAnalyserById は superdough → @strudel/webaudio 経由で
+//       strudel.ccのevalScopeに既にグローバル展開されているので、別途importしない
+//       (別インスタンスを作ると実際の音声グラフと繋がらず機能しない)。
 
 // ══════════════════════════════════════════════════════════
 // vizHaps() : hapイベント(発音のタイミング・音程・gain等)を送信
@@ -94,109 +95,75 @@ Pattern.prototype.vizHaps = function (url = 'ws://localhost:8181', options = {})
 };
 
 // ══════════════════════════════════════════════════════════
-// vizScope() : マスター出力(全パターン合成後)の時間波形を送信
+// vizScope() : 差した対象のパターン自身の時間波形を送信
+//              (superdoughの .analyze(id) を使った、真に部分適用可能な実装)
 // ══════════════════════════════════════════════════════════
 
-const scopeState = {
-  analyser: null, // 共有AnalyserNode。destinationへ繋がる全ノードをここに集約する
-  tapInstalled: false,
-  loopStarted: false,
-  sockets: new Map(),
-};
-
-// destination(スピーカー出口)への接続を検知し、共有analyserに繋ぎ替える。
-// superdoughはノートごとに使い捨てのgainノードを作って直接destinationに繋ぐ構成なので、
-// 「マスターgainを名指しで掴む」のではなく「destinationへの接続そのものを横取りする」方式にしている。
-//
-// 注意: Strudelは再生の開始/停止のタイミングでAudioContextを作り直すことがある。
-// 共有analyserが古いcontextのまま残っていると「different AudioContexts」エラーになるため、
-// 接続しようとしているノードのcontextと共有analyserのcontextが食い違っていたら作り直す。
-// destination(スピーカー出口)への接続を検知し、共有analyserに繋ぎ替える。
-// superdoughはノートごとに使い捨てのgainノードを作って直接destinationに繋ぐ構成なので、
-// 「マスターgainを名指しで掴む」のではなく「destinationへの接続そのものを横取りする」方式にしている。
-//
-// 注意: .preload() 等はOfflineAudioContext(オフラインレンダリング、実際には音が出ない)
-// 上でも同じ connect(destination) を呼ぶため、区別せず同じanalyserに繋ごうとすると
-// 「別のAudioContext同士は接続できない」というエラーになる。
-// OfflineAudioContext由来の接続は可視化する意味がないので、素通りさせて無視する。
-function installDestinationTap(fftSize) {
-  if (scopeState.tapInstalled) return;
-  scopeState.tapInstalled = true;
-
-  const origConnect = AudioNode.prototype.connect;
-  AudioNode.prototype.connect = function (dest, ...rest) {
-    if (typeof AudioDestinationNode !== 'undefined' && dest instanceof AudioDestinationNode) {
-      const ctx = this.context;
-
-      if (typeof OfflineAudioContext !== 'undefined' && ctx instanceof OfflineAudioContext) {
-        return origConnect.call(this, dest, ...rest);
-      }
-
-      if (!scopeState.analyser) {
-        scopeState.analyser = ctx.createAnalyser();
-        scopeState.analyser.fftSize = fftSize;
-        scopeState.analyser.smoothingTimeConstant = 0.7;
-        origConnect.call(scopeState.analyser, ctx.destination); // analyser→destinationは一度だけ
-        console.log('[vizScope] shared analyser created');
-      }
-      // 個々のノードはdestinationの代わりに共有analyserへ繋ぎ替える(音は素通り)
-      return origConnect.call(this, scopeState.analyser);
-    }
-    return origConnect.call(this, dest, ...rest);
-  };
-}
+const scopeSockets = new Map(); // url -> WebSocket
+const scopeStarted = new Set(); // `${url}::${id}` -> 送信ループが既に動いているか
+let scopeAutoId = 0;
 
 function getScopeSocket(url) {
-  let ws = scopeState.sockets.get(url);
+  let ws = scopeSockets.get(url);
   if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
     ws = new WebSocket(url);
-    scopeState.sockets.set(url, ws);
+    scopeSockets.set(url, ws);
   }
   return ws;
 }
 
-// 時間波形(Uint8Array, 0-255)を-1〜1の配列に間引きながら正規化する
 function downsampleWave(src, targetLen) {
   const out = new Array(targetLen);
   const step = src.length / targetLen;
-  for (let i = 0; i < targetLen; i++) {
-    out[i] = (src[Math.floor(i * step)] - 128) / 128;
-  }
+  for (let i = 0; i < targetLen; i++) out[i] = src[Math.floor(i * step)];
   return out;
 }
 
 /**
  * pattern.vizScope(url, options)
  *
- * @param {string} url                       中継サーバーのWebSocket URL (default: ws://localhost:8181)
+ * @param {string} url                        中継サーバーのWebSocket URL (default: ws://localhost:8181)
  * @param {object} [options]
- * @param {number} [options.fftSize=1024]    analyserのFFTサイズ(2の累乗)。波形の時間分解能に影響。
- * @param {number} [options.waveLength=128]  時間波形を何点に間引いて送るか
+ * @param {string} [options.id]               省略時は自動採番。同じ楽器を複数箇所で
+ *   チェインして合算したい場合は明示的に揃える。マスター全体が欲しい場合は
+ *   stack(...)の一番外側に一度だけ差せばよい。
+ * @param {number} [options.fft=5]            analyserのfftSizeは 2**(fft+5)
+ * @param {number} [options.waveLength=128]   時間波形を何点に間引いて送るか
+ * @param {number} [options.lookbehind=0.5]   .draw()に渡すlookbehind(hap有無判定用)
+ * @param {number} [options.lookahead=0.2]    .draw()に渡すlookahead(hap有無判定用)
  */
 Pattern.prototype.vizScope = function (url = 'ws://localhost:8181', options = {}) {
-  const { fftSize = 1024, waveLength = 128 } = options;
+  const {
+    id = `scope${scopeAutoId++}`,
+    fft = 5,
+    waveLength = 128,
+    lookbehind = 0.5,
+    lookahead = 0.2,
+  } = options;
 
-  installDestinationTap(fftSize);
+  let active = false; // 直近のdrawコールバックで判定した「今鳴っているか」
 
-  if (!scopeState.loopStarted) {
-    scopeState.loopStarted = true;
-    const timeData = new Uint8Array(fftSize);
+  const patched = this.draw(
+    (haps, time) => {
+      // 現在時刻timeを[begin, end)に含むhapが1つでもあれば「鳴っている」
+      active = haps.some((hap) => hap.whole.begin <= time && hap.whole.end > time);
+    },
+    { lookbehind, lookahead, id: `${id}::active` } // vizHaps等のdraw idと衝突させない
+  ).analyze(id).fft(fft);
 
-    function send() {
+  const key = url + '::' + id;
+  if (!scopeStarted.has(key)) {
+    scopeStarted.add(key);
+    const send = () => {
       const ws = getScopeSocket(url);
-      if (scopeState.analyser && ws.readyState === WebSocket.OPEN) {
-        scopeState.analyser.getByteTimeDomainData(timeData);
-        ws.send(
-          JSON.stringify({
-            type: 'scope',
-            wave: downsampleWave(timeData, waveLength),
-          })
-        );
+      if (ws.readyState === WebSocket.OPEN) {
+        const data = getAnalyzerData('time', id);
+        if (data) ws.send(JSON.stringify({ type: 'scope', id, active, wave: downsampleWave(data, waveLength) }));
       }
       requestAnimationFrame(send);
-    }
+    };
     requestAnimationFrame(send);
   }
 
-  return this; // 副作用のみ、パターン自体は変更しない
+  return patched;
 };
